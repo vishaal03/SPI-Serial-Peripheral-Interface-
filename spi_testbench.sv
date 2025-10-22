@@ -1,3 +1,5 @@
+//TestBench
+
 `timescale 1ns/100ps
 
 module SPI_TB();
@@ -180,3 +182,4 @@ end
 
 
 endmodule
+
