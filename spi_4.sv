@@ -40,7 +40,7 @@ initial begin
   rst=1'b0;	
   clk=1'b0;
   start_comm=1'b0;
-  CS_in=3'b00;
+  CS_in=3'b000;
   wait_rand=0;
   data_send_c='0;
   data_send_p='0;
@@ -177,5 +177,6 @@ always begin
   #10;
   clk=~clk;
 end
+
 
 endmodule
