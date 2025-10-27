@@ -30,13 +30,7 @@ The setup is ideal for understanding multi-slave SPI bus behavior, timing, and p
 
 ---
 
-##  Testbench Description
-The provided testbench performs the following:
-- Initializes the SPI bus.  
-- Sends unique data from the master to each of the six slaves.  
-- Each slave returns a predefined response (for example, its ID number).  
-- Master verifies that responses match the expected data.  
-- Displays transaction details using `$display` for easy waveform debugging.
+
 
 ---
 
@@ -51,7 +45,233 @@ The provided testbench performs the following:
 
 ---
 
+#  SPI Testbench Documentation (`SPI_tb.sv`)
 
+##  Overview
+This testbench verifies the functionality of a **Serial Peripheral Interface (SPI)** system that includes:
+- One **controller** (master)
+- Up to **six peripherals** (slaves)
+
+It tests correct transmission and reception of data between the controller and peripherals under different communication scenarios.
+
+---
+
+##  Top-Level Parameters
+
+| Parameter | Description | Default |
+|------------|--------------|----------|
+| `PAUSE` | Clock cycle pause between controller TX and peripheral TX | `5` |
+| `LENGTH_SEND_C` | Bits sent from controller → peripheral | `8` |
+| `LENGTH_SEND_P` | Bits sent from peripheral → controller | `16` |
+| `LENGTH_RECEIVED_C` | Number of bits controller receives | `16` |
+| `LENGTH_RECEIVED_P` | Number of bits peripheral receives | `8` |
+| `LENGTH_COUNT_C` | Bit width of controller counter | `6` |
+| `LENGTH_COUNT_P` | Bit width of peripheral counter | `6` |
+| `PERIPHERY_COUNT` | Number of peripherals | `6` |
+| `PERIPHERY_SELECT` | Number of bits for chip-select | `3` |
+
+Derived constants like `TOTAL_CYCLES` calculate the total number of clock cycles per full SPI transfer.
+
+---
+
+##  Clock Generation
+
+```systemverilog
+initial begin
+  clk = 0;
+  forever #5 clk = ~clk;
+end
+```
+
+- Generates a **100 MHz clock** (`10 ns` period).
+- Drives all synchronous SPI logic (controller + peripherals).
+
+---
+
+##  Reset and Initialization
+
+```systemverilog
+initial begin
+  rst = 1'b1;
+  start_comm = 1'b0;
+  CS_in = '0;
+  data_send_c = '0;
+  data_send_p = '0;
+
+  repeat (5) @(posedge clk);
+  rst = 1'b0;
+end
+```
+
+- Applies a synchronous reset for 5 clock cycles.
+- Initializes control and data lines.
+- Ensures the SPI system starts from a clean state.
+
+---
+
+##  DUT Instantiation
+
+```systemverilog
+SPI #( ... parameters ... ) dut ( ... ports ... );
+```
+
+This instantiates the **SPI top-level design**, which internally connects:
+- One SPI controller
+- Six SPI peripherals
+
+It passes all timing and width parameters from the testbench for configurability.
+
+---
+
+##  Peripheral Register Mapping
+
+```systemverilog
+always_comb begin
+  case (CS_in)
+    3'd0: COPI_register_compare = dut.COPI_register_0;
+    3'd1: COPI_register_compare = dut.COPI_register_1;
+    ...
+  endcase
+end
+```
+
+This logic selects the **active peripheral’s received data register** based on the chip-select (`CS_in`).
+
+This allows the testbench to automatically check data received by the correct peripheral during testing.
+
+---
+
+##  Test Descriptions
+
+The testbench contains **three test cases**, each validating a different communication scenario.
+
+---
+
+###  TEST 1: Peripheral 0 Only
+
+- Only **Peripheral 0** is enabled.
+- Random data is generated for both directions (`controller → peripheral` and `peripheral → controller`).
+- The test verifies:
+  - Controller correctly receives the data sent by the peripheral.
+  - Peripheral 0 correctly receives the data sent by the controller.
+
+ **Expected Output Example**
+```
+PASS Controller RX = 0xA5B3
+PASS Peripheral 0 RX = 0x3F
+```
+
+---
+
+###  TEST 2: Retrigger While Busy
+
+- Tests the SPI’s **retrigger protection**.
+- While the controller is mid-transfer, a new `start_comm` pulse is applied.
+- The DUT must **ignore retrigger attempts** until the current transaction completes.
+- Ensures robustness against timing errors.
+
+ **Expected Output Example**
+```
+PASS Retrigger Controller RX = 0xBEEF
+PASS Retrigger Peripheral 0 RX = 0x7A
+```
+
+---
+
+###  TEST 3: Random Peripheral Selection
+
+- Randomly selects one of the six peripherals.
+- Random data is sent both directions.
+- Checks that only the **selected peripheral** receives and transmits data correctly.
+- Confirms proper functioning of chip-select logic.
+
+ **Expected Output Example**
+```
+PASS Controller RX = 0x12F4 from Peripheral 3
+PASS Peripheral 3 RX = 0xA7
+```
+
+---
+
+##  Pass / Fail Conditions
+
+Each test iteration uses `$display` for successful operations and `$error` + `$finish` for mismatches.
+
+Example failure:
+```
+FAIL Controller RX Expected 0xBEEF Got 0xBAAD
+```
+
+Example success:
+```
+Test 3 Completed Successfully
+=== ALL TESTS PASSED ===
+```
+
+---
+
+##  Simulation Notes
+
+Run this file with ModelSim/Questa using:
+```bash
+vlog SPI_tb.sv
+vsim SPI_tb
+run -all
+```
+
+You can disable waveform dumping if using ModelSim:
+```systemverilog
+// $dumpfile("spi_wave.vcd");
+// $dumpvars(0, SPI_tb);
+```
+
+---
+
+##  Summary of What’s Verified
+
+| Functionality | Verified By |
+|----------------|--------------|
+| SPI controller-to-peripheral data transfer | Test 1 |
+| SPI peripheral-to-controller data transfer | Test 1 |
+| Retrigger protection (controller busy) | Test 2 |
+| Multi-peripheral chip-select operation | Test 3 |
+| Randomized data and timing robustness | All Tests |
+
+---
+
+##  File Dependencies
+
+| File | Description |
+|------|-------------|
+| `SPI_tb.sv` | Testbench (this file) |
+| `SPI.sv` | Top-level SPI design |
+| `spi_controller.sv` | Controller module |
+| `spi_peripheral.sv` | Peripheral module |
+| `spi_topmodule.sv` | Integration file for all peripherals |
+
+---
+
+## Expected Behavior Summary
+
+After running the simulation:
+- All three tests should complete with **no `$error` messages**.
+- The console should end with:
+
+```
+=== ALL TESTS PASSED ===
+```
+
+---
+
+##  Conclusion
+
+This testbench ensures:
+- Reliable SPI data transfer.
+- Correct timing and synchronization.
+- Functional chip-select logic for multiple peripherals.
+- Proper handling of edge cases (e.g., retriggering).
+
+It provides a thorough and reusable environment for verifying SPI-based digital designs.
 
 
 
