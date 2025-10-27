@@ -1,88 +1,120 @@
-//SPI controller
+module SPI_Controller #(
+  parameter int PAUSE = 5,                       // Number of controller clocks between TX and RX phases
+  parameter int LENGTH_SEND = 8,                 // Bits to send (Controller -> Peripheral)
+  parameter int LENGTH_RECEIVED = 8,             // Bits to receive (Peripheral -> Controller)
+  parameter int PERIPHERY_COUNT = 6,             // Number of peripherals
+  parameter int PERIPHERY_SELECT = 3             // Bits to select peripheral (log2(PERIPHERY_COUNT))
+) (
+  input  logic                          clk,        // Controller clock
+  input  logic                          rst,        // Active-high asynchronous reset
+  input  logic                          CIPO,       // Controller-In Peripheral-Out (serial in)
+  input  logic [LENGTH_SEND-1:0]        data_send,  // Parallel data to send (must be valid when start asserted)
+  input  logic                          start_comm, // Start pulse to initiate SPI transfer
+  input  logic [PERIPHERY_SELECT-1:0]   CS_in,      // Peripheral select encoded (binary)
 
-module SPI_Controller(rst,clk,SCK,COPI,CIPO,CIPO_register,CS_in,CS_out,data_send,start_comm);
+  output logic                          COPI,       // Controller-Out Peripheral-In (serial out)
+  output logic                          SCK,        // Shared serial clock
+  output logic [PERIPHERY_COUNT-1:0]    CS_out,     // Active-low chip selects (1=inactive, 0=active)
+  output logic [LENGTH_RECEIVED-1:0]    CIPO_register, // Received parallel data
+  output logic                          busy        // Busy indicator
+);
 
-//Parameter declarations
-parameter PAUSE=5;                           //Number of clock cycles between transmit and receive
-parameter LENGTH_SEND=8;                     //Length of sent data (Controller->Peripheray)
-parameter LENGTH_RECIEVED=8;                 //Length of recieved data (Peripheray-->Controller)
-parameter LENGTH_COUNT=5;                    //Default: 8+8+10=26 -->5 bit counter
-parameter PERIPHERY_COUNT=4;                 //Number of peripherals
-parameter PERIPHERY_SELECT=2;                //Periphery select signals (log2 of PERIPHERY_COUNT)
-//Input declarations
-input logic clk;                             //Controller clock 
-input logic rst;                             //Active high logic
+  //===========================================================
+  // Derived timing constants
+  //===========================================================
+  localparam int TX_CYCLES     = LENGTH_SEND;
+  localparam int PAUSE_CYCLES  = PAUSE;
+  localparam int RX_CYCLES     = LENGTH_RECEIVED;
+  localparam int EXTRA_CYCLES  = 2;
+  localparam int TOTAL_CYCLES  = TX_CYCLES + PAUSE_CYCLES + RX_CYCLES + EXTRA_CYCLES;
 
-input logic CIPO;                            //Controller-In Peripheral-Out
-input logic [LENGTH_SEND-1:0] data_send;     //Data to be sent from the controller to one of the peripherals
-input logic start_comm;                      //SPI communication protocol is initiated when start_comm rises to logic high. At this instance the data_send should be valid
-input logic [PERIPHERY_SELECT-1:0] CS_in;
-//Output declarations
-output logic COPI;                           //Controller-Out Peripheral-In
-output logic SCK;                            //Shared clock between controller and peripheral units
-output logic [PERIPHERY_COUNT-1:0] CS_out;   //Chip-select
-output logic [LENGTH_RECIEVED-1:0] CIPO_register;   //Holds the data received from the peripheral unit
+  // Counter width large enough to count all cycles
+  localparam int COUNT_WIDTH = $clog2(TOTAL_CYCLES + 1);
 
-//Internal logic signals 
-logic start_comm_delayed;                    //One clock cycle delayed start_comm signal
-logic start;                                 //Rises to logic high for a single clock cycle upon communication initiation
-logic busy;
-logic [LENGTH_COUNT-1:0] count_neg;          //Negative-edge counter. The controller modifies the COPI line on the negative edge of the shared clock (peripheral unit samples on rising edge)
-logic [LENGTH_COUNT-1:0] count_pos;          //Positive-edge counter - for the SCK generation
+  logic [COUNT_WIDTH-1:0] count_pos;     // Posedge domain counter
+  logic [COUNT_WIDTH-1:0] count_neg;     // Negedge domain counter
 
-logic [LENGTH_SEND-1:0] COPI_register;       //The data to be sent is sampled - used in a shift-register structure
-integer i;
+  logic start_comm_delayed;
+  logic start_pulse;
+  logic [LENGTH_SEND-1:0] COPI_shiftreg;
 
-//HDL code
+  //===========================================================
+  // Posedge clock domain: control, chip select, and receiving
+  //===========================================================
+  always_ff @(posedge clk or posedge rst) begin
+    if (rst) begin
+      start_comm_delayed <= 1'b0;
+      start_pulse <= 1'b0;
+      busy <= 1'b0;
+      CIPO_register <= '0;
+      count_pos <= TOTAL_CYCLES;
+      CS_out <= {PERIPHERY_COUNT{1'b1}}; // all inactive
+    end else begin
+      // Generate single-cycle start pulse
+      start_comm_delayed <= start_comm;
+      start_pulse <= start_comm && !start_comm_delayed && !busy;
 
-always @(posedge clk or negedge rst)
-  if (!rst) begin
-    start_comm_delayed<=1'b0;
-    start<=1'b0;
-    busy<=1'b0;
-    CIPO_register<='0;
-    count_pos<=(LENGTH_COUNT)'(LENGTH_SEND)+(LENGTH_COUNT)'(LENGTH_RECIEVED)+(LENGTH_COUNT)'(1)+(LENGTH_COUNT)'(PAUSE);
-    CS_out<='0;
+      if (start_pulse) begin
+        count_pos <= '0;
+        busy <= 1'b1;
+
+        // Decode CS_in -> one-hot active-low CS_out
+        CS_out <= {PERIPHERY_COUNT{1'b1}}; // default all inactive
+        if (CS_in < PERIPHERY_COUNT)
+          CS_out[CS_in] <= 1'b0;           // activate selected peripheral
+      end
+      else if (count_pos < TOTAL_CYCLES) begin
+        count_pos <= count_pos + 1;
+      end
+      else begin
+        busy <= 1'b0;
+        CS_out <= {PERIPHERY_COUNT{1'b1}}; // deassert all
+      end
+
+      // Sample incoming CIPO during receive phase
+      if ((count_pos >= (TX_CYCLES + PAUSE_CYCLES)) &&
+          (count_pos <  (TX_CYCLES + PAUSE_CYCLES + RX_CYCLES))) begin
+        CIPO_register <= {CIPO, CIPO_register[LENGTH_RECEIVED-1:1]};
+      end
+    end
   end
-  else begin
-    start_comm_delayed<=start_comm;         //Generating a single clock cycle pulse indication initiation of communication
-    start<=start_comm&&(~start_comm_delayed)&&(~busy);
 
-    if ((count_neg>(LENGTH_COUNT)'(LENGTH_SEND)+(LENGTH_COUNT)'(1)+(LENGTH_COUNT)'(PAUSE)) && (count_neg<(LENGTH_COUNT)'(LENGTH_SEND)+(LENGTH_COUNT)'(PAUSE)+(LENGTH_COUNT)'(LENGTH_RECIEVED)+(LENGTH_COUNT)'(2)))    //Receiving data from peripheral unit
-      CIPO_register<={CIPO,CIPO_register[LENGTH_RECIEVED-1:1]};
+  //===========================================================
+  // Negedge clock domain: transmit shift register (COPI)
+  //===========================================================
+  always_ff @(negedge clk or posedge rst) begin
+    if (rst) begin
+      COPI_shiftreg <= '0;
+      COPI <= 1'b0;
+      count_neg <= TOTAL_CYCLES;
+    end else begin
+      if (start_pulse) begin
+        count_neg <= '0;
+        COPI_shiftreg <= data_send;  // load data to send
+      end
+      else if (count_neg < TX_CYCLES) begin
+        COPI <= COPI_shiftreg[0];
+        COPI_shiftreg <= COPI_shiftreg >> 1;
+        count_neg <= count_neg + 1;
+      end
+      else if (count_neg < TOTAL_CYCLES) begin
+        count_neg <= count_neg + 1;
+      end
+    end
+  end
 
-    if (start==1'b1) begin
-      count_pos<='0;
-      busy<=1'b1;
-
-      for (i=0; i<PERIPHERY_COUNT; i++)
-        CS_out[i]<=~(CS_in==($bits(CS_in))'(i));
-end
-    else if (count_pos<(LENGTH_COUNT)'(LENGTH_SEND)+(LENGTH_COUNT)'(LENGTH_RECIEVED)+(LENGTH_COUNT)'(PAUSE)+(LENGTH_COUNT)'(1))
-      count_pos<=count_pos+(LENGTH_COUNT)'(1);	
+  //===========================================================
+  // Serial Clock (SCK) Generation
+  //===========================================================
+  always_comb begin
+    if (count_pos < TX_CYCLES)
+      SCK = clk;
+    else if (count_pos < TX_CYCLES + PAUSE_CYCLES)
+      SCK = 1'b1;
+    else if (count_pos < TX_CYCLES + PAUSE_CYCLES + RX_CYCLES)
+      SCK = clk;
     else
-      busy<=1'b0;
-end
-
-always @(negedge clk or negedge rst)
-  if (!rst) begin
-    COPI_register<='0;
-    COPI<=1'b0;
-    count_neg<=LENGTH_SEND+LENGTH_RECIEVED+2+PAUSE;
-  end
-  else if (start==1'b1) begin
-    count_neg<=0;
-    COPI_register<=data_send;  //Sample data to be sent to the peripheral unit
-  end
-  else if (count_neg<LENGTH_SEND) begin
-    COPI<=COPI_register[0];
-    COPI_register<=COPI_register>>1;
-    count_neg<=count_neg+1;
-  end
-  else if (count_neg<LENGTH_SEND+LENGTH_RECIEVED+PAUSE+2) begin
-    count_neg<=count_neg+1;
+      SCK = 1'b1;
   end
 
-//Creating the serial clock shared by the controller and all peripheral units
-assign SCK = (count_pos<LENGTH_SEND) ? clk : (count_pos<LENGTH_SEND+PAUSE) ? 1'b1 : (count_pos<LENGTH_SEND+LENGTH_RECIEVED+PAUSE+1) ? clk  : 1'b1;	
 endmodule
